@@ -5,8 +5,8 @@
 #include <Adafruit_NeoPixel.h>
 
 #include <WiFi.h>
-// #include <driver/rmt.h>
-#include "esp32-hal.h"
+#include "esp_timer.h"
+#include "esp_log.h"
 
 //////////////////////////////////////////////
 
@@ -109,6 +109,9 @@ constexpr uint32_t cmdPilot = 0B110011;
 constexpr uint32_t cmdUp = 0B111011;
 constexpr uint32_t cmdDown = 0B000000;
 
+constexpr uint32_t addrCmdTimeMS = (((addressLength+cmdLength)*3*radioPeriodUS)+999) / 1000;
+constexpr uint32_t packetDurationMS = addrCmdTimeMS + packetGapTimeMS;
+
 uint64_t lastSendCommandTime = 0;
 uint64_t dontSendBeforeTime = 0;
 
@@ -156,6 +159,9 @@ void updateIndicator(hardwareState state, float valvePosition) {
 	else if (state == stateOff) {
 		color = offColor;
 	}
+	else if ((state == stateIgniting || state == stateExtinguishing) && ((millis()%200) < 50)) {
+		color = 0;
+	}
 	else {
 		color = makeFlameColor(valvePosition);
 	}
@@ -164,6 +170,61 @@ void updateIndicator(hardwareState state, float valvePosition) {
 }
 
 //////////////////////////////////////////////
+
+volatile uint32_t bitPattern = 0;
+volatile uint32_t bitMask = 0;
+volatile uint8_t bitPhase = 0;
+
+esp_timer_handle_t periodic_timer;
+
+static void timer_callback(void* arg) {
+    if (bitPhase == 0) {
+		digitalWrite(radioDataPin, HIGH);
+		bitPhase = 1;
+	}
+	else if (bitPhase == 1) {
+		if ((bitPattern & bitMask) == 0) {
+			digitalWrite(radioDataPin, LOW);
+		}
+		bitPhase = 2;
+	}
+	else {
+		if ((bitPattern & bitMask) != 0) {
+			digitalWrite(radioDataPin, LOW);
+		}
+		bitMask >>= 1;
+		if (bitMask == 0) {
+			ESP_ERROR_CHECK(esp_timer_stop(periodic_timer));
+		}
+		bitPhase = 0;
+	}
+}
+
+void sendCommandTimer(uint32_t cmd, uint32_t address = remoteAddress) {
+	while (millis64() < dontSendBeforeTime);
+	while (bitMask);
+
+	lastSendCommandTime = millis64();
+	dontSendBeforeTime = lastSendCommandTime + packetDurationMS;
+
+	bitPattern = (address << cmdLength) | cmd;
+	bitMask = 1 << (addressLength+cmdLength-1);
+	bitPhase = 0;
+
+    ESP_ERROR_CHECK(esp_timer_start_periodic(periodic_timer, radioPeriodUS));
+}
+
+void initRadioTimer() {
+    const esp_timer_create_args_t periodic_timer_args = {
+            .callback = &timer_callback,
+            .name = "radioTimer"
+    };
+
+    ESP_ERROR_CHECK(esp_timer_create(&periodic_timer_args, &periodic_timer));
+
+	pinMode(radioDataPin, OUTPUT);
+	digitalWrite(radioDataPin, LOW);
+}
 
 void sendBit(bool bit) {
 	digitalWrite(radioDataPin, HIGH);
@@ -197,20 +258,24 @@ void sendCommand(uint32_t cmd, uint32_t address = remoteAddress) {
 //////////////////////////////////////////////
 
 void sendPilot() {
-	sendCommand(cmdPilot);
+	// sendCommand(cmdPilot);
+	sendCommandTimer(cmdPilot);
 }
 
 void sendUp() {
-	sendCommand(cmdUp);
+	// sendCommand(cmdUp);
+	sendCommandTimer(cmdUp);
 }
 
 void sendDown() {
-	sendCommand(cmdDown);
+	// sendCommand(cmdDown);
+	sendCommandTimer(cmdDown);
 }
 
 void initRadio() {
-	pinMode(radioDataPin, OUTPUT);
-	digitalWrite(radioDataPin, LOW);
+	// pinMode(radioDataPin, OUTPUT);
+	// digitalWrite(radioDataPin, LOW);
+	initRadioTimer();
 }
 
 //////////////////////////////////////////////
