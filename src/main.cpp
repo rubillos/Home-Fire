@@ -23,6 +23,7 @@ constexpr uint8_t radioDataPin = MISO;
 //////////////////////////////////////////////
 
 bool wifiConnected = false;
+bool hadWifiConnection = false;
 
 constexpr uint8_t ledStatusLevel = 0x10;
 
@@ -441,12 +442,15 @@ void addCommands() {
 void statusChanged(HS_STATUS status) {
 	if (status == HS_WIFI_CONNECTING) {
 		wifiConnected = false;
-		SerPrintf("Lost WIFI Connection...\n");
+		if (hadWifiConnection) {
+			SerPrintf("Lost WIFI Connection...\n");
+		}
 	}
 }
 
 void wifiReady() {
 	wifiConnected = true;
+	hadWifiConnection = true;
 	SerPrintf("WIFI: Ready.\n");
 }
 
