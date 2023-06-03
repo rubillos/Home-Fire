@@ -5,7 +5,7 @@
 #include <Adafruit_NeoPixel.h>
 
 #include <WiFi.h>
-#include "esp_timer.h"
+#include "driver/rmt.h"
 #include "esp_log.h"
 
 //////////////////////////////////////////////
@@ -25,33 +25,6 @@ constexpr uint8_t radioDataPin = MISO;
 bool wifiConnected = false;
 bool hadWifiConnection = false;
 
-constexpr uint8_t ledStatusLevel = 0x10;
-
-#define MAKE_RGB(r, g, b) (r<<16 | g<<8 | b)
-constexpr uint32_t flashColor = MAKE_RGB(ledStatusLevel, 0, ledStatusLevel);
-constexpr uint32_t startColor = MAKE_RGB(0, ledStatusLevel, 0);
-constexpr uint32_t connectingColor = MAKE_RGB(0, 0, ledStatusLevel);
-constexpr uint32_t offColor = MAKE_RGB(0, ledStatusLevel, ledStatusLevel);
-constexpr uint32_t sendColor = MAKE_RGB(ledStatusLevel, ledStatusLevel, ledStatusLevel);
-
-uint32_t currentIndicatorColor = 0xFFFFFFFF;
-
-constexpr uint32_t whiteColorFlag = 1 << 24;
-
-uint32_t makeFlameColor(float level) {
-	constexpr uint8_t ledBright = 30;
-	uint8_t rL = ledBright*6/10;
-	uint8_t gL = ledBright*6/10;
-	uint8_t rH = ledBright;
-	uint8_t gH = 0;
-	uint8_t r = rL + (rH - rL) * level;
-	uint8_t g = gL + (gH - gL) * level;
-
-	return MAKE_RGB(r, g, 0);
-}
-
-//////////////////////////////////////////////
-
 #if defined(DEBUG)
 // #define SerPrintf(...) Serial.printf(__VA_ARGS__)
 #define SerPrintf(...) Serial.printf("%d: ", millis()); Serial.printf(__VA_ARGS__)
@@ -62,6 +35,7 @@ uint32_t makeFlameColor(float level) {
 #endif
 
 //////////////////////////////////////////////
+
 uint64_t millis64() {
 	volatile static uint32_t low32 = 0, high32 = 0;
 	uint32_t new_low32 = millis();
@@ -119,6 +93,33 @@ uint64_t dontSendBeforeTime = 0;
 
 //////////////////////////////////////////////
 
+constexpr uint8_t ledStatusLevel = 0x10;
+
+#define MAKE_RGB(r, g, b) (r<<16 | g<<8 | b)
+constexpr uint32_t flashColor = MAKE_RGB(ledStatusLevel, 0, ledStatusLevel);
+constexpr uint32_t startColor = MAKE_RGB(0, ledStatusLevel, 0);
+constexpr uint32_t connectingColor = MAKE_RGB(0, 0, ledStatusLevel);
+constexpr uint32_t offColor = MAKE_RGB(0, ledStatusLevel, ledStatusLevel);
+constexpr uint32_t sendColor = MAKE_RGB(ledStatusLevel, ledStatusLevel, ledStatusLevel);
+
+uint32_t currentIndicatorColor = 0xFFFFFFFF;
+
+constexpr uint32_t whiteColorFlag = 1 << 24;
+
+uint32_t makeFlameColor(float level) {
+	constexpr uint8_t ledBright = 30;
+	uint8_t rL = ledBright*6/10;
+	uint8_t gL = ledBright*6/10;
+	uint8_t rH = ledBright;
+	uint8_t gH = 0;
+	uint8_t r = rL + (rH - rL) * level;
+	uint8_t g = gL + (gH - gL) * level;
+
+	return MAKE_RGB(r, g, 0);
+}
+
+//////////////////////////////////////////////
+
 Adafruit_NeoPixel indicator(1, indicatorDataPin);
 
 void setIndicator(uint32_t color) {
@@ -161,7 +162,7 @@ void updateIndicator(hardwareState state, float valvePosition) {
 	else if (state == stateOff) {
 		color = offColor;
 	}
-	else if ((state == stateIgniting || state == stateExtinguishing) && ((millis()%200) < 50)) {
+	else if ((state == stateIgniting || state == stateExtinguishing) && ((millis()%200) < 30)) {
 		color = 0;
 	}
 	else {
@@ -204,11 +205,16 @@ void encodeCommand(rmt_item32_t* item, uint32_t cmd, uint32_t address = remoteAd
 // Adafruit's NeoPixel driver steps on channel 0, use channel 1
 constexpr rmt_channel_t rmtChannel = (rmt_channel_t)1;
 
+extern bool rmt_reserved_channels[];
+
 void initRadioRMT() {
     rmt_config_t config = RMT_DEFAULT_CONFIG_TX((gpio_num_t)radioDataPin, rmtChannel);
 
     ESP_ERROR_CHECK(rmt_config(&config));
     ESP_ERROR_CHECK(rmt_driver_install(rmtChannel, 0, 0));
+
+	// mark our channel used in the Adafruit driver.
+	rmt_reserved_channels[rmtChannel] = true;
 
 	encodeCommand(pilotMessage, cmdPilot);
 	encodeCommand(upMessage, cmdUp);
