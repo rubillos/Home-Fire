@@ -109,7 +109,8 @@ constexpr uint32_t cmdPilot = 0B110011;
 constexpr uint32_t cmdUp = 0B111011;
 constexpr uint32_t cmdDown = 0B000000;
 
-constexpr uint32_t addrCmdTimeMS = (((addressLength+cmdLength)*3*radioPeriodUS)+999) / 1000;
+constexpr uint16_t messageLength = addressLength + cmdLength;
+constexpr uint32_t addrCmdTimeMS = ((messageLength*3*radioPeriodUS)+999) / 1000;
 constexpr uint32_t packetDurationMS = addrCmdTimeMS + packetGapTimeMS;
 
 uint64_t lastSendCommandTime = 0;
@@ -171,6 +172,58 @@ void updateIndicator(hardwareState state, float valvePosition) {
 
 //////////////////////////////////////////////
 
+rmt_item32_t pilotMessage[messageLength];
+rmt_item32_t upMessage[messageLength];
+rmt_item32_t downMessage[messageLength];
+
+void encodeBit(rmt_item32_t* item, bool bit) {
+	item->duration0 = radioPeriodUS * (bit ? 2 : 1);
+	item->level0 = true;
+	item->duration1 = radioPeriodUS * (bit ? 1 : 2);
+	item->level1 = false;
+}
+
+rmt_item32_t* encodeBits(rmt_item32_t* item, uint32_t bits, uint8_t length) {
+	if (length) {
+		uint32_t mask = 1 << (length-1);
+
+		for (auto i=0; i<length; i++) {
+			encodeBit(item++, (bits & mask) != 0);
+			mask >>= 1;
+		}
+	}
+	return item;
+}
+
+void encodeCommand(rmt_item32_t* item, uint32_t cmd, uint32_t address = remoteAddress) {
+	item = encodeBits(item, address, addressLength);
+	item = encodeBits(item, cmd, cmdLength);
+}
+
+constexpr rmt_channel_t rmtChannel = (rmt_channel_t)1;
+
+void initRadioRMT() {
+    rmt_config_t config = RMT_DEFAULT_CONFIG_TX((gpio_num_t)radioDataPin, rmtChannel);
+
+    ESP_ERROR_CHECK(rmt_config(&config));
+    ESP_ERROR_CHECK(rmt_driver_install(rmtChannel, 0, 0));
+
+	encodeCommand(pilotMessage, cmdPilot);
+	encodeCommand(upMessage, cmdUp);
+	encodeCommand(downMessage, cmdDown);
+}
+
+void sendCommandRMT(rmt_item32_t* message) {
+	while (millis64() < dontSendBeforeTime);
+
+	lastSendCommandTime = millis64();
+	dontSendBeforeTime = lastSendCommandTime + packetDurationMS;
+
+    ESP_ERROR_CHECK(rmt_write_items(rmtChannel, message, messageLength, false));
+}
+
+//////////////////////////////////////////////
+
 volatile uint32_t bitPattern = 0;
 volatile uint32_t bitMask = 0;
 volatile uint8_t bitPhase = 0;
@@ -226,6 +279,8 @@ void initRadioTimer() {
 	digitalWrite(radioDataPin, LOW);
 }
 
+//////////////////////////////////////////////
+
 void sendBit(bool bit) {
 	digitalWrite(radioDataPin, HIGH);
 	delayMicroseconds(radioPeriodUS * (bit ? 2 : 1));
@@ -259,23 +314,27 @@ void sendCommand(uint32_t cmd, uint32_t address = remoteAddress) {
 
 void sendPilot() {
 	// sendCommand(cmdPilot);
-	sendCommandTimer(cmdPilot);
+	// sendCommandTimer(cmdPilot);
+	sendCommandRMT(pilotMessage);
 }
 
 void sendUp() {
 	// sendCommand(cmdUp);
-	sendCommandTimer(cmdUp);
+	// sendCommandTimer(cmdUp);
+	sendCommandRMT(upMessage);
 }
 
 void sendDown() {
 	// sendCommand(cmdDown);
-	sendCommandTimer(cmdDown);
+	// sendCommandTimer(cmdDown);
+	sendCommandRMT(downMessage);
 }
 
 void initRadio() {
 	// pinMode(radioDataPin, OUTPUT);
 	// digitalWrite(radioDataPin, LOW);
-	initRadioTimer();
+	// initRadioTimer();
+	initRadioRMT();
 }
 
 //////////////////////////////////////////////
