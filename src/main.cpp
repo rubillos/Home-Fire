@@ -165,69 +165,6 @@ void updateIndicator(hardwareState state, float valvePosition) {
 
 //////////////////////////////////////////////
 
-constexpr uint16_t messageLength = addressLength + cmdLength;
-constexpr uint32_t messageTimeUS = messageLength * 3 * radioPeriodUS;
-constexpr uint32_t messageHoldMS = ((messageTimeUS+999)/1000) + packetGapTimeMS;
-
-rmt_data_t pilotMessage[messageLength];
-rmt_data_t upMessage[messageLength];
-rmt_data_t downMessage[messageLength];
-
-void encodeBit(rmt_data_t* item, bool bit) {
-	item->duration0 = radioPeriodUS * (bit ? 2 : 1);
-	item->level0 = true;
-	item->duration1 = radioPeriodUS * (bit ? 1 : 2);
-	item->level1 = false;
-}
-
-void encodeDelay(rmt_data_t* item, uint16_t delay) {
-	item->duration0 = delay;
-	item->level0 = false;
-	item->duration1 = 0;
-	item->level1 = false;
-}
-
-rmt_data_t* encodeBits(rmt_data_t* item, uint32_t bits, uint8_t length) {
-	if (length) {
-		uint32_t mask = 1 << (length-1);
-
-		for (auto i=0; i<length; i++) {
-			encodeBit(item++, (bits & mask) != 0);
-			mask >>= 1;
-		}
-	}
-	return item;
-}
-
-void encodeCommand(rmt_data_t* item, uint32_t cmd, uint32_t address = remoteAddress) {
-	item = encodeBits(item, address, addressLength);
-	item = encodeBits(item, cmd, cmdLength);
-}
-
-rmt_obj_t* rmt_send = NULL;
-
-void initRMT() {
-    if ((rmt_send = rmtInit(radioDataPin, RMT_TX_MODE, RMT_MEM_64)) == NULL)
-    {
-        Serial.println("init rmt sender failed\n");
-    }
-
-    float realTick = rmtSetTick(rmt_send, 1000);
-    SerPrintf("real tick set to: %fns\n", realTick);
-
-	encodeCommand(pilotMessage, cmdPilot);
-	encodeCommand(upMessage, cmdUp);
-	encodeCommand(downMessage, cmdDown);
-}
-
-void sendMessage(rmt_data_t* message) {
-	while (millis64() < dontSendBeforeTime);
-
-	lastSendCommandTime = millis64();
-	rmtWrite(rmt_send, message, messageLength);
-	dontSendBeforeTime = lastSendCommandTime + messageHoldMS;
-}
-
 void sendBit(bool bit) {
 	digitalWrite(radioDataPin, HIGH);
 	delayMicroseconds(radioPeriodUS * (bit ? 2 : 1));
@@ -261,23 +198,19 @@ void sendCommand(uint32_t cmd, uint32_t address = remoteAddress) {
 
 void sendPilot() {
 	sendCommand(cmdPilot);
-	// sendMessage(pilotMessage);
 }
 
 void sendUp() {
 	sendCommand(cmdUp);
-	// sendMessage(upMessage);
 }
 
 void sendDown() {
 	sendCommand(cmdDown);
-	// sendMessage(downMessage);
 }
 
 void initRadio() {
 	pinMode(radioDataPin, OUTPUT);
 	digitalWrite(radioDataPin, LOW);
-	// initRMT();
 }
 
 //////////////////////////////////////////////
