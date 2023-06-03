@@ -1,0 +1,16 @@
+{
+  "name": "homebridge-fireplace-rf",
+  "version": "1.0.0",
+  "description": "Homebridge plugin for controlling remote control fireplaces",
+  "author": "Matthew Hall",
+  "keywords": [
+    "homebridge-plugin"
+  ],
+  "engines": {
+    "node": ">=4.0.0",
+    "homebridge": ">=0.2.0"
+  },
+  "dependencies": {
+    "rpio": "^1.7.1"
+  }
+}
