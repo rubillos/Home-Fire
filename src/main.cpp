@@ -5,6 +5,8 @@
 #include <Adafruit_NeoPixel.h>
 
 #include <WiFi.h>
+// #include <driver/rmt.h>
+#include "esp32-hal.h"
 
 //////////////////////////////////////////////
 
@@ -163,6 +165,69 @@ void updateIndicator(hardwareState state, float valvePosition) {
 
 //////////////////////////////////////////////
 
+constexpr uint16_t messageLength = addressLength + cmdLength;
+constexpr uint32_t messageTimeUS = messageLength * 3 * radioPeriodUS;
+constexpr uint32_t messageHoldMS = ((messageTimeUS+999)/1000) + packetGapTimeMS;
+
+rmt_data_t pilotMessage[messageLength];
+rmt_data_t upMessage[messageLength];
+rmt_data_t downMessage[messageLength];
+
+void encodeBit(rmt_data_t* item, bool bit) {
+	item->duration0 = radioPeriodUS * (bit ? 2 : 1);
+	item->level0 = true;
+	item->duration1 = radioPeriodUS * (bit ? 1 : 2);
+	item->level1 = false;
+}
+
+void encodeDelay(rmt_data_t* item, uint16_t delay) {
+	item->duration0 = delay;
+	item->level0 = false;
+	item->duration1 = 0;
+	item->level1 = false;
+}
+
+rmt_data_t* encodeBits(rmt_data_t* item, uint32_t bits, uint8_t length) {
+	if (length) {
+		uint32_t mask = 1 << (length-1);
+
+		for (auto i=0; i<length; i++) {
+			encodeBit(item++, (bits & mask) != 0);
+			mask >>= 1;
+		}
+	}
+	return item;
+}
+
+void encodeCommand(rmt_data_t* item, uint32_t cmd, uint32_t address = remoteAddress) {
+	item = encodeBits(item, address, addressLength);
+	item = encodeBits(item, cmd, cmdLength);
+}
+
+rmt_obj_t* rmt_send = NULL;
+
+void initRMT() {
+    if ((rmt_send = rmtInit(radioDataPin, RMT_TX_MODE, RMT_MEM_64)) == NULL)
+    {
+        Serial.println("init rmt sender failed\n");
+    }
+
+    float realTick = rmtSetTick(rmt_send, 1000);
+    SerPrintf("real tick set to: %fns\n", realTick);
+
+	encodeCommand(pilotMessage, cmdPilot);
+	encodeCommand(upMessage, cmdUp);
+	encodeCommand(downMessage, cmdDown);
+}
+
+void sendMessage(rmt_data_t* message) {
+	while (millis64() < dontSendBeforeTime);
+
+	lastSendCommandTime = millis64();
+	rmtWrite(rmt_send, message, messageLength);
+	dontSendBeforeTime = lastSendCommandTime + messageHoldMS;
+}
+
 void sendBit(bool bit) {
 	digitalWrite(radioDataPin, HIGH);
 	delayMicroseconds(radioPeriodUS * (bit ? 2 : 1));
@@ -194,6 +259,29 @@ void sendCommand(uint32_t cmd, uint32_t address = remoteAddress) {
 
 //////////////////////////////////////////////
 
+void sendPilot() {
+	sendCommand(cmdPilot);
+	// sendMessage(pilotMessage);
+}
+
+void sendUp() {
+	sendCommand(cmdUp);
+	// sendMessage(upMessage);
+}
+
+void sendDown() {
+	sendCommand(cmdDown);
+	// sendMessage(downMessage);
+}
+
+void initRadio() {
+	pinMode(radioDataPin, OUTPUT);
+	digitalWrite(radioDataPin, LOW);
+	// initRMT();
+}
+
+//////////////////////////////////////////////
+
 struct FireplaceFan : Service::Fan {
 	SpanCharacteristic *_onOff = NULL;
 	SpanCharacteristic *_level = NULL;
@@ -210,6 +298,12 @@ struct FireplaceFan : Service::Fan {
 
 	float _currentValvePosition = 0;
 
+	bool _setOnOff = false;
+	bool _newOnOffValue = false;
+
+	bool _setLevel = false;
+	float _newLevelValue = 0;
+
 	FireplaceFan() : Service::Fan() {
 		_onOff = new Characteristic::Active(false);
 		_level = new Characteristic::RotationSpeed(valveMaxValue);
@@ -221,13 +315,15 @@ struct FireplaceFan : Service::Fan {
 		bool onOffUpdate = _onOff->updated();
 		bool onOffValue = _onOff->getNewVal()>0;
 		bool levelUpdate = _level->updated();
+		float levelValue = _level->getNewVal<float>();
 		bool ignite = false;
 		bool extinguish = false;
 		bool changeLevel = false;
 
 		if (onOffUpdate && onOffValue && _state==stateOff) {
 			if (_state == stateExtinguishing) {
-				_onOff->setVal(false);
+				_setOnOff = true;
+				_newOnOffValue = false;
 			}
 			else {
 				ignite = true;
@@ -235,9 +331,11 @@ struct FireplaceFan : Service::Fan {
 		}
 		else if (onOffUpdate && !onOffValue && _state!=stateOff) {
 			if (_state == stateIgniting) {
-				_onOff->setVal(true);
-				if (_level->getNewVal() != 100) {
-					_level->setVal(100);
+				_setOnOff = false;
+				_newOnOffValue = true;
+				if (levelValue != valveMaxValue) {
+					_setLevel = true;
+					_newLevelValue = valveMaxValue;
 				}
 			}
 			else {
@@ -250,16 +348,22 @@ struct FireplaceFan : Service::Fan {
 			}
 		}
 
+		if (levelUpdate && !changeLevel) {
+			_setLevel = true;
+			_newLevelValue = _level->getVal<float>();
+		}
+
 		if (ignite) {  // ignite
 			SerPrintf("Ignite...\n");
-			if (_level->getNewVal() != 100) {
-				_level->setVal(100);
+			if (levelValue != valveMaxValue) {
+				_setLevel = true;
+				_newLevelValue = valveMaxValue;
 			}
-			_currentValvePosition = 10;
+			_currentValvePosition = valveMinValue;
 			_state = stateIgniting;
 			_startStopCount = 10;
 			_startValvePosition = _currentValvePosition;
-			_endValvePosition = 100;
+			_endValvePosition = valveMaxValue;
 			_operationStartTime = time;
 			_operationEndTime = time + igniteTimeMS;
 		}
@@ -274,7 +378,7 @@ struct FireplaceFan : Service::Fan {
 		}
 		else if (changeLevel) {
 			_startValvePosition = _currentValvePosition;
-			_endValvePosition = _level->getNewVal<float>();
+			_endValvePosition = levelValue;
 			_operationStartTime = time;
 			_operationEndTime = time + (abs(_endValvePosition-_startValvePosition) / (valveMaxValue-valveMinValue) * fullRangeValveTimeMS);
 			_state = (_endValvePosition > _startValvePosition) ? stateIncreasing : stateDecreasing;
@@ -303,35 +407,54 @@ struct FireplaceFan : Service::Fan {
 		else if (_state == stateIgniting && time >= _operationEndTime) {
 			_state = stateLitIdle;
 			_currentValvePosition = valveMaxValue;
+			if (_onOff->getVal() != 1) {
+				_onOff->setVal(1);
+				_setOnOff = false;
+			}
 			SerPrintf("Ignited.\n");
 		}
 		else if (_state == stateExtinguishing && time >= _operationEndTime) {
 			_state = stateOff;
+			if (_onOff->getVal() != 0) {
+				_onOff->setVal(0);
+				_setOnOff = false;
+			}
 			SerPrintf("Extinguished.\n");
+		}
+
+		if (_setOnOff) {
+			SerPrintf("Reset onoOff to: %d\n", _newOnOffValue);
+			_onOff->setVal(_newOnOffValue);
+			_setOnOff = false;
+		}
+		if (_setLevel) {
+			SerPrintf("Reset level to: %0.1f%%\n", _newLevelValue);
+			_level->setVal(_newLevelValue);
+			_setLevel = false;
 		}
 
 		if (time >= dontSendBeforeTime) {
 			if (_state == stateIncreasing) {
-				sendCommand(cmdUp);
+				sendUp();
 				// SerPrintf("Up\n");
 		 }
 			else if (_state == stateDecreasing) {
-				sendCommand(cmdDown);
+				sendDown();
 				// SerPrintf("Down\n");
 			}
 			else if (_state == stateIgniting && _startStopCount) {
-				sendCommand(cmdPilot);
+				sendPilot();
 				_startStopCount -= 1;
 				SerPrintf("Pilot\n");
 			}
 			else if (_state == stateExtinguishing && _startStopCount) {
-				sendCommand(cmdPilot);
+				sendPilot();
 				_startStopCount -= 1;
 				SerPrintf("Pilot\n");
 			}
 		}
 
-		updateIndicator(_state, _currentValvePosition / 100.0);
+		updateIndicator(_state, _currentValvePosition / valveMaxValue);
 	}
 };
 
@@ -390,8 +513,7 @@ void setup() {
 	addCommands();
 
 	SerPrintf("Setup Radio\n");
-	pinMode(radioDataPin, OUTPUT);
-	digitalWrite(radioDataPin, LOW);
+	initRadio();
 
 	SerPrintf("Wait for WiFi...\n");
 	setIndicator(connectingColor);
