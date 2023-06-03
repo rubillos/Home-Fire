@@ -200,6 +200,7 @@ void encodeCommand(rmt_item32_t* item, uint32_t cmd, uint32_t address = remoteAd
 	item = encodeBits(item, cmd, cmdLength);
 }
 
+// Adafruit's NeoPixel driver steps on channel 0, use channel 1
 constexpr rmt_channel_t rmtChannel = (rmt_channel_t)1;
 
 void initRadioRMT() {
@@ -224,116 +225,19 @@ void sendCommandRMT(rmt_item32_t* message) {
 
 //////////////////////////////////////////////
 
-volatile uint32_t bitPattern = 0;
-volatile uint32_t bitMask = 0;
-volatile uint8_t bitPhase = 0;
-
-esp_timer_handle_t periodic_timer;
-
-static void timer_callback(void* arg) {
-    if (bitPhase == 0) {
-		digitalWrite(radioDataPin, HIGH);
-		bitPhase = 1;
-	}
-	else if (bitPhase == 1) {
-		if ((bitPattern & bitMask) == 0) {
-			digitalWrite(radioDataPin, LOW);
-		}
-		bitPhase = 2;
-	}
-	else {
-		if ((bitPattern & bitMask) != 0) {
-			digitalWrite(radioDataPin, LOW);
-		}
-		bitMask >>= 1;
-		if (bitMask == 0) {
-			ESP_ERROR_CHECK(esp_timer_stop(periodic_timer));
-		}
-		bitPhase = 0;
-	}
-}
-
-void sendCommandTimer(uint32_t cmd, uint32_t address = remoteAddress) {
-	while (millis64() < dontSendBeforeTime);
-	while (bitMask);
-
-	lastSendCommandTime = millis64();
-	dontSendBeforeTime = lastSendCommandTime + packetDurationMS;
-
-	bitPattern = (address << cmdLength) | cmd;
-	bitMask = 1 << (addressLength+cmdLength-1);
-	bitPhase = 0;
-
-    ESP_ERROR_CHECK(esp_timer_start_periodic(periodic_timer, radioPeriodUS));
-}
-
-void initRadioTimer() {
-    const esp_timer_create_args_t periodic_timer_args = {
-            .callback = &timer_callback,
-            .name = "radioTimer"
-    };
-
-    ESP_ERROR_CHECK(esp_timer_create(&periodic_timer_args, &periodic_timer));
-
-	pinMode(radioDataPin, OUTPUT);
-	digitalWrite(radioDataPin, LOW);
-}
-
-//////////////////////////////////////////////
-
-void sendBit(bool bit) {
-	digitalWrite(radioDataPin, HIGH);
-	delayMicroseconds(radioPeriodUS * (bit ? 2 : 1));
-	digitalWrite(radioDataPin, LOW);
-	delayMicroseconds(radioPeriodUS * (bit ? 1 : 2));
-}
-
-void sendBits(uint32_t bits, uint8_t length) {
-	if (length) {
-		uint32_t mask = 1 << (length-1);
-
-		for (auto i=0; i<length; i++) {
-			sendBit((bits & mask) != 0);
-			mask >>= 1;
-		}
-	}
-}
-
-void sendCommand(uint32_t cmd, uint32_t address = remoteAddress) {
-	while (millis64() < dontSendBeforeTime);
-
-	lastSendCommandTime = millis64();
-
-	sendBits(address, addressLength);
-	sendBits(cmd, cmdLength);
-	
-	dontSendBeforeTime = millis64() + packetGapTimeMS;
-}
-
-//////////////////////////////////////////////
-
 void sendPilot() {
-	// sendCommand(cmdPilot);
-	// sendCommandTimer(cmdPilot);
 	sendCommandRMT(pilotMessage);
 }
 
 void sendUp() {
-	// sendCommand(cmdUp);
-	// sendCommandTimer(cmdUp);
 	sendCommandRMT(upMessage);
 }
 
 void sendDown() {
-	// sendCommand(cmdDown);
-	// sendCommandTimer(cmdDown);
 	sendCommandRMT(downMessage);
 }
 
 void initRadio() {
-	// pinMode(radioDataPin, OUTPUT);
-	// digitalWrite(radioDataPin, LOW);
-	// initRadioTimer();
 	initRadioRMT();
 }
 
