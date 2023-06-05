@@ -12,6 +12,8 @@
 
 constexpr const char* versionString = "v0.1";
 
+constexpr const char* accessoryName = "Fireplace";
+
 constexpr const char* displayName = "Fireplace-Controller";
 constexpr const char* modelName = "Fireplace-Controller-ESP32";
 
@@ -19,6 +21,27 @@ constexpr uint8_t indicatorDataPin = PIN_NEOPIXEL;
 constexpr uint8_t indicatorPowerPin = NEOPIXEL_POWER;
 
 constexpr uint8_t radioDataPin = MISO;
+
+//////////////////////////////////////////////
+
+// constexpr uint32_t igniteTimeMS = 15 * 1000;
+// constexpr uint32_t extinguishTimeMS = 15 * 1000;
+// constexpr uint32_t fullRangeValveTimeMS = 12 * 1000;
+
+constexpr uint32_t igniteTimeMS = 5 * 1000;
+constexpr uint32_t extinguishTimeMS = 5 * 1000;
+constexpr uint32_t fullRangeValveTimeMS = 5 * 1000;
+
+constexpr uint32_t radioPeriodUS = 265;
+constexpr uint32_t packetGapTimeMS = 20;
+
+constexpr uint8_t addressLength = 17;
+constexpr uint32_t remoteAddress = 0B01011100000100001;
+
+constexpr uint8_t cmdLength = 6;
+constexpr uint32_t cmdPilot = 0B110011;
+constexpr uint32_t cmdUp = 0B111011;
+constexpr uint32_t cmdDown = 0B000000;
 
 //////////////////////////////////////////////
 
@@ -64,25 +87,6 @@ constexpr float homeKitFullScale = 100.0;
 constexpr float valveMinValue = 10.0;
 constexpr float valveMaxValue = 100.0;
 constexpr float valveStepValue = 10.0;
-
-// constexpr uint32_t igniteTimeMS = 15 * 1000;
-// constexpr uint32_t extinguishTimeMS = 15 * 1000;
-// constexpr uint32_t fullRangeValveTimeMS = 12 * 1000;
-
-constexpr uint32_t igniteTimeMS = 5 * 1000;
-constexpr uint32_t extinguishTimeMS = 5 * 1000;
-constexpr uint32_t fullRangeValveTimeMS = 5 * 1000;
-
-constexpr uint32_t radioPeriodUS = 265;
-constexpr uint32_t packetGapTimeMS = 20;
-
-constexpr uint8_t addressLength = 17;
-constexpr uint32_t remoteAddress = 0B01011100000100001;
-
-constexpr uint8_t cmdLength = 6;
-constexpr uint32_t cmdPilot = 0B110011;
-constexpr uint32_t cmdUp = 0B111011;
-constexpr uint32_t cmdDown = 0B000000;
 
 constexpr uint16_t messageLength = addressLength + cmdLength;
 constexpr uint32_t addrCmdTimeMS = ((messageLength*3*radioPeriodUS)+999) / 1000;
@@ -204,7 +208,6 @@ void encodeCommand(rmt_item32_t* item, uint32_t cmd, uint32_t address = remoteAd
 
 // Adafruit's NeoPixel driver steps on channel 0, use channel 1
 constexpr rmt_channel_t rmtChannel = (rmt_channel_t)1;
-
 extern bool rmt_reserved_channels[];
 
 void initRadioRMT() {
@@ -365,38 +368,36 @@ struct FireplaceFan : Service::Fan {
 			// SerPrintf("Valve: %0.1f%%\n", _currentValvePosition);
 		}
 
-		if (_state == stateIncreasing || _state == stateDecreasing) {
-			if (time >= _operationEndTime) {
-				_currentValvePosition = _endValvePosition;
-				_state = stateLitIdle;
-				SerPrintf("Change done.\n");
-			}
+		if ((_state == stateIncreasing || _state == stateDecreasing) && (time >= _operationEndTime)) {
+			_currentValvePosition = _endValvePosition;
+			_state = stateLitIdle;
+			SerPrintf("Change done.\n");
 		}
 		else if (_state == stateIgniting && time >= _operationEndTime) {
 			_state = stateLitIdle;
 			_currentValvePosition = valveMaxValue;
-			if (_onOff->getVal() != 1) {
-				_onOff->setVal(1);
+			if (!_onOff->getVal()) {
+				_onOff->setVal(true);
 				_setOnOff = false;
 			}
 			SerPrintf("Ignited.\n");
 		}
 		else if (_state == stateExtinguishing && time >= _operationEndTime) {
 			_state = stateOff;
-			if (_onOff->getVal() != 0) {
-				_onOff->setVal(0);
+			if (_onOff->getVal()) {
+				_onOff->setVal(false);
 				_setOnOff = false;
 			}
 			SerPrintf("Extinguished.\n");
 		}
 
 		if (_setOnOff) {
-			SerPrintf("Reset onoOff to: %d\n", _newOnOffValue);
+			SerPrintf("Force onoOff to: %d\n", _newOnOffValue);
 			_onOff->setVal(_newOnOffValue);
 			_setOnOff = false;
 		}
 		if (_setLevel) {
-			SerPrintf("Reset level to: %0.1f%%\n", _newLevelValue);
+			SerPrintf("Force level to: %0.1f%%\n", _newLevelValue);
 			_level->setVal(_newLevelValue);
 			_setLevel = false;
 		}
@@ -405,7 +406,7 @@ struct FireplaceFan : Service::Fan {
 			if (_state == stateIncreasing) {
 				sendUp();
 				// SerPrintf("Up\n");
-		 }
+			}
 			else if (_state == stateDecreasing) {
 				sendDown();
 				// SerPrintf("Down\n");
@@ -433,14 +434,8 @@ FireplaceFan* fireplace;
 void createDevices() {
 	SPAN_ACCESSORY();   // create Bridge
 
-	SPAN_ACCESSORY("Fireplace");
+	SPAN_ACCESSORY(accessoryName);
 		fireplace = new FireplaceFan();
-}
-
-//////////////////////////////////////////////
-
-void addCommands() {
-	// new SpanUserCommand('s',"show CPU stats", cmdShowCPUStats);
 }
 
 //////////////////////////////////////////////
@@ -471,7 +466,7 @@ void setup() {
 	setIndicator(startColor);
 
 	SerBegin(115200);
-	SerPrintf("Tim-Fire Startup\n");
+	SerPrintf("Home-Fire Startup\n");
 
 	SerPrintf("Init HomeSpan\n");
 	homeSpan.setSketchVersion(versionString);
@@ -481,7 +476,6 @@ void setup() {
 
 	SerPrintf("Create devices\n");
 	createDevices();
-	addCommands();
 
 	SerPrintf("Setup Radio\n");
 	initRadio();
