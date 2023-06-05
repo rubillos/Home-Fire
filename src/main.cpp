@@ -39,9 +39,11 @@ constexpr uint8_t addressLength = 17;
 constexpr uint32_t remoteAddress = 0B01011100000100001;
 
 constexpr uint8_t cmdLength = 6;
-constexpr uint32_t cmdPilot = 0B110011;
-constexpr uint32_t cmdUp = 0B111011;
-constexpr uint32_t cmdDown = 0B000000;
+typedef enum {
+	cmdPilot = 0B110011,
+	cmdUp = 0B111011,
+	cmdDown = 0B000000
+} CmdCode;
 
 //////////////////////////////////////////////
 
@@ -98,17 +100,17 @@ uint64_t dontSendBeforeTime = 0;
 //////////////////////////////////////////////
 
 constexpr uint8_t ledStatusLevel = 0x10;
+constexpr uint32_t whiteColorFlag = 1 << 24;
 
 #define MAKE_RGB(r, g, b) (r<<16 | g<<8 | b)
-constexpr uint32_t flashColor = MAKE_RGB(ledStatusLevel, 0, ledStatusLevel);
-constexpr uint32_t startColor = MAKE_RGB(0, ledStatusLevel, 0);
-constexpr uint32_t connectingColor = MAKE_RGB(0, 0, ledStatusLevel);
-constexpr uint32_t offColor = MAKE_RGB(0, ledStatusLevel, ledStatusLevel);
-constexpr uint32_t sendColor = MAKE_RGB(ledStatusLevel, ledStatusLevel, ledStatusLevel);
+#define MAKE_RGB_STATUS(r, g, b) ((r*ledStatusLevel)<<16 | (g*ledStatusLevel)<<8 | (b*ledStatusLevel))
 
-uint32_t currentIndicatorColor = 0xFFFFFFFF;
-
-constexpr uint32_t whiteColorFlag = 1 << 24;
+constexpr uint32_t blackColor = MAKE_RGB_STATUS(0, 0, 0);
+constexpr uint32_t flashColor = MAKE_RGB_STATUS(1, 0, 1);
+constexpr uint32_t startColor = MAKE_RGB_STATUS(0, 1, 0);
+constexpr uint32_t connectingColor = MAKE_RGB_STATUS(0, 0, 1);
+constexpr uint32_t offColor = MAKE_RGB_STATUS(0, 1, 1);
+constexpr uint32_t sendColor = MAKE_RGB_STATUS(1, 1, 1);
 
 uint32_t makeFlameColor(float level) {
 	constexpr uint8_t ledBright = 30;
@@ -125,6 +127,7 @@ uint32_t makeFlameColor(float level) {
 //////////////////////////////////////////////
 
 Adafruit_NeoPixel indicator(1, indicatorDataPin);
+uint32_t currentIndicatorColor = 0xFFFFFFFF;
 
 void setIndicator(uint32_t color) {
 	if (color != currentIndicatorColor) {
@@ -167,10 +170,10 @@ void updateIndicator(hardwareState state, float valvePosition) {
 		color = offColor;
 	}
 	else if ((state == stateIgniting || state == stateExtinguishing) && ((millis()%200) < 30)) {
-		color = 0;
+		color = blackColor;
 	}
 	else {
-		color = makeFlameColor(valvePosition);
+		color = makeFlameColor((valvePosition-valveMinValue)/(valveMaxValue-valveMinValue));
 	}
 
 	setIndicator(color);
@@ -210,7 +213,7 @@ void encodeCommand(rmt_item32_t* item, uint32_t cmd, uint32_t address = remoteAd
 constexpr rmt_channel_t rmtChannel = (rmt_channel_t)1;
 extern bool rmt_reserved_channels[];
 
-void initRadioRMT() {
+void initRadio() {
     rmt_config_t config = RMT_DEFAULT_CONFIG_TX((gpio_num_t)radioDataPin, rmtChannel);
 
     ESP_ERROR_CHECK(rmt_config(&config));
@@ -224,7 +227,7 @@ void initRadioRMT() {
 	encodeCommand(downMessage, cmdDown);
 }
 
-void sendCommandRMT(rmt_item32_t* message) {
+void sendMessage(rmt_item32_t* message) {
 	while (millis64() < dontSendBeforeTime);
 
 	lastSendCommandTime = millis64();
@@ -233,22 +236,12 @@ void sendCommandRMT(rmt_item32_t* message) {
     ESP_ERROR_CHECK(rmt_write_items(rmtChannel, message, messageLength, false));
 }
 
-//////////////////////////////////////////////
-
-void sendPilot() {
-	sendCommandRMT(pilotMessage);
-}
-
-void sendUp() {
-	sendCommandRMT(upMessage);
-}
-
-void sendDown() {
-	sendCommandRMT(downMessage);
-}
-
-void initRadio() {
-	initRadioRMT();
+void sendCommand(CmdCode cmd) {
+	switch (cmd) {
+		case cmdPilot:	sendMessage(pilotMessage);		break;
+		case cmdDown:	sendMessage(downMessage);		break;
+		case cmdUp:		sendMessage(upMessage);			break;
+	}
 }
 
 //////////////////////////////////////////////
@@ -258,22 +251,15 @@ struct FireplaceFan : Service::Fan {
 	SpanCharacteristic *_level = NULL;
 
 	hardwareState _state = stateOff;
+	float _currentValvePosition = 0;
 
 	uint64_t _operationStartTime;
 	uint64_t _operationEndTime;
-
-	float _startValvePosition = 0;
-	float _endValvePosition = 0;
-
+	float _valveStartPosition = 0;
+	float _valveEndPosition = 0;
 	uint16_t _startStopCount = 0;
 
-	float _currentValvePosition = 0;
-
-	bool _setOnOff = false;
-	bool _newOnOffValue = false;
-
-	bool _setLevel = false;
-	float _newLevelValue = 0;
+	float _overrideLevel = -1;
 
 	FireplaceFan() : Service::Fan() {
 		_onOff = new Characteristic::Active(false);
@@ -283,77 +269,56 @@ struct FireplaceFan : Service::Fan {
 
 	boolean update() {
 		uint64_t time = millis64();
-		bool onOffUpdate = _onOff->updated();
+		bool onOffUpdated = _onOff->updated();
 		bool onOffValue = _onOff->getNewVal()>0;
-		bool levelUpdate = _level->updated();
+		bool levelUpdated = _level->updated();
 		float levelValue = _level->getNewVal<float>();
 		bool ignite = false;
 		bool extinguish = false;
 		bool changeLevel = false;
 
-		if (onOffUpdate && onOffValue && _state==stateOff) {
-			if (_state == stateExtinguishing) {
-				_setOnOff = true;
-				_newOnOffValue = false;
-			}
-			else {
-				ignite = true;
-			}
+		if (onOffUpdated && onOffValue && _state==stateOff) {
+			ignite = true;
 		}
-		else if (onOffUpdate && !onOffValue && _state!=stateOff) {
-			if (_state == stateIgniting) {
-				_setOnOff = false;
-				_newOnOffValue = true;
-				if (levelValue != valveMaxValue) {
-					_setLevel = true;
-					_newLevelValue = valveMaxValue;
-				}
-			}
-			else {
-				extinguish = true;
-			}
+		else if (onOffUpdated && !onOffValue && _state!=stateOff && _state!=stateExtinguishing) {
+			extinguish = true;
 		}
-		else if (levelUpdate) {
+		else if (levelUpdated && _state!=stateIgniting && _state!=stateExtinguishing) {
 			if (_state == stateLitIdle || _state == stateIncreasing || _state == stateDecreasing) {
 				changeLevel = true;
 			}
 		}
 
-		if (levelUpdate && !changeLevel) {
-			_setLevel = true;
-			_newLevelValue = _level->getVal<float>();
+		if (levelUpdated && !changeLevel && !ignite && !extinguish) {
+			_overrideLevel = _level->getVal<float>();
 		}
 
-		if (ignite) {  // ignite
+		if (ignite) {
 			SerPrintf("Ignite...\n");
-			if (levelValue != valveMaxValue) {
-				_setLevel = true;
-				_newLevelValue = valveMaxValue;
-			}
 			_currentValvePosition = valveMinValue;
 			_state = stateIgniting;
 			_startStopCount = 10;
-			_startValvePosition = _currentValvePosition;
-			_endValvePosition = valveMaxValue;
+			_valveStartPosition = _currentValvePosition;
+			_valveEndPosition = valveMaxValue;
 			_operationStartTime = time;
 			_operationEndTime = time + igniteTimeMS;
 		}
-		else if (extinguish) {  // extinguish
+		else if (extinguish) {
 			SerPrintf("Extinguish...\n");
 			_state = stateExtinguishing;
 			_startStopCount = 5;
-			_startValvePosition = _currentValvePosition;
-			_endValvePosition = 10;
+			_valveStartPosition = _currentValvePosition;
+			_valveEndPosition = 10;
 			_operationStartTime = time;
 			_operationEndTime = time + extinguishTimeMS;
 		}
 		else if (changeLevel) {
-			_startValvePosition = _currentValvePosition;
-			_endValvePosition = levelValue;
+			_valveStartPosition = _currentValvePosition;
+			_valveEndPosition = levelValue;
 			_operationStartTime = time;
-			_operationEndTime = time + (abs(_endValvePosition-_startValvePosition) / (valveMaxValue-valveMinValue) * fullRangeValveTimeMS);
-			_state = (_endValvePosition > _startValvePosition) ? stateIncreasing : stateDecreasing;
-			SerPrintf("Changing level from %0.1f%% to %0.1f%% over %dmS.\n", _startValvePosition, _endValvePosition, (int)(_operationEndTime-_operationStartTime));
+			_operationEndTime = time + (abs(_valveEndPosition-_valveStartPosition) / (valveMaxValue-valveMinValue) * fullRangeValveTimeMS);
+			_state = (_valveEndPosition > _valveStartPosition) ? stateIncreasing : stateDecreasing;
+			SerPrintf("Changing level from %0.1f%% to %0.1f%% over %dmS.\n", _valveStartPosition, _valveEndPosition, (int)(_operationEndTime-_operationStartTime));
 		}
 
 		return true;
@@ -363,67 +328,66 @@ struct FireplaceFan : Service::Fan {
 		uint64_t time = millis64();
 
 		if (_state == stateIncreasing || _state == stateDecreasing || _state == stateIgniting || _state == stateExtinguishing) {
-			_currentValvePosition = _startValvePosition + (time - _operationStartTime) * (_endValvePosition-_startValvePosition) / (_operationEndTime - _operationStartTime);
+			_currentValvePosition = _valveStartPosition + (time - _operationStartTime) * (_valveEndPosition-_valveStartPosition) / (_operationEndTime - _operationStartTime);
 			_currentValvePosition = max(valveMinValue, min(valveMaxValue, _currentValvePosition));
 			// SerPrintf("Valve: %0.1f%%\n", _currentValvePosition);
 		}
 
+		if (_state == stateIgniting) {
+			_overrideLevel = 100;
+		}
+
 		if ((_state == stateIncreasing || _state == stateDecreasing) && (time >= _operationEndTime)) {
-			_currentValvePosition = _endValvePosition;
 			_state = stateLitIdle;
+			_currentValvePosition = _valveEndPosition;
 			SerPrintf("Change done.\n");
 		}
 		else if (_state == stateIgniting && time >= _operationEndTime) {
 			_state = stateLitIdle;
 			_currentValvePosition = valveMaxValue;
-			if (!_onOff->getVal()) {
-				_onOff->setVal(true);
-				_setOnOff = false;
-			}
 			SerPrintf("Ignited.\n");
 		}
 		else if (_state == stateExtinguishing && time >= _operationEndTime) {
 			_state = stateOff;
-			if (_onOff->getVal()) {
-				_onOff->setVal(false);
-				_setOnOff = false;
-			}
 			SerPrintf("Extinguished.\n");
 		}
 
-		if (_setOnOff) {
-			SerPrintf("Force onoOff to: %d\n", _newOnOffValue);
-			_onOff->setVal(_newOnOffValue);
-			_setOnOff = false;
+		bool onOffShouldBe = _state!=stateOff && _state!=stateExtinguishing;
+		if (_onOff->getVal() != onOffShouldBe) {
+			SerPrintf("Force onoOff to: %d\n", onOffShouldBe);
+			_onOff->setVal(onOffShouldBe);
 		}
-		if (_setLevel) {
-			SerPrintf("Force level to: %0.1f%%\n", _newLevelValue);
-			_level->setVal(_newLevelValue);
-			_setLevel = false;
+
+		if (_overrideLevel != -1) {
+			if (_overrideLevel != _level->getVal<float>()) {
+				SerPrintf("Force level to: %0.1f%%\n", _overrideLevel);
+				_level->setVal(_overrideLevel);
+			}
+			_overrideLevel = -1;
 		}
 
 		if (time >= dontSendBeforeTime) {
 			if (_state == stateIncreasing) {
-				sendUp();
-				// SerPrintf("Up\n");
+				sendCommand(cmdUp);
+				// SerPrintf("Send: Up\n");
 			}
 			else if (_state == stateDecreasing) {
-				sendDown();
-				// SerPrintf("Down\n");
+				sendCommand(cmdDown);
+				// SerPrintf("Send: Down\n");
 			}
 			else if (_state == stateIgniting && _startStopCount) {
-				sendPilot();
+				sendCommand(cmdPilot);
 				_startStopCount -= 1;
-				SerPrintf("Pilot\n");
+				SerPrintf("Send: Pilot\n");
 			}
 			else if (_state == stateExtinguishing && _startStopCount) {
-				sendPilot();
+				sendCommand(cmdPilot);
 				_startStopCount -= 1;
-				SerPrintf("Pilot\n");
+				SerPrintf("Send: Pilot\n");
 			}
 		}
 
-		updateIndicator(_state, _currentValvePosition / valveMaxValue);
+		updateIndicator(_state, _currentValvePosition);
 	}
 };
 
@@ -462,34 +426,39 @@ void setup() {
 	digitalWrite(indicatorPowerPin, HIGH);
 
 	indicator.begin();
+
+	#ifdef DEBUG
 	flashIndicator(flashColor, 20, 200);
 	setIndicator(startColor);
+	#endif
 
 	SerBegin(115200);
 	SerPrintf("Home-Fire Startup\n");
 
-	SerPrintf("Init HomeSpan\n");
+	SerPrintf("Init HomeSpan...\n");
 	homeSpan.setSketchVersion(versionString);
 	homeSpan.setWifiCallback(wifiReady);
 	homeSpan.setStatusCallback(statusChanged);
 	homeSpan.begin(Category::Bridges, displayName, DEFAULT_HOST_NAME, modelName);
 
-	SerPrintf("Create devices\n");
+	SerPrintf("Create devices...\n");
 	createDevices();
 
-	SerPrintf("Setup Radio\n");
+	SerPrintf("Setup Radio...\n");
 	initRadio();
+
+	SerPrintf("Init complete.\n");
 
 	SerPrintf("Wait for WiFi...\n");
 	setIndicator(connectingColor);
-
-	SerPrintf("Init complete.\n");
 }
 
 void loop() {
 	homeSpan.poll();
 
-	if (!wifiConnected) {
+	// HomeSpan does not call the wifi callback after the first connection
+	// We do that manually here
+	if (hadWifiConnection && !wifiConnected) {
 		static uint64_t nextWifiCheck = 0;
 		uint64_t time = millis64();
 
