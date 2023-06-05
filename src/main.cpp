@@ -246,7 +246,7 @@ void sendCommand(CmdCode cmd) {
 
 //////////////////////////////////////////////
 
-struct FireplaceFan : Service::Fan {
+struct Fireplace : Service::Fan {
 	SpanCharacteristic *_onOff = NULL;
 	SpanCharacteristic *_level = NULL;
 
@@ -261,7 +261,7 @@ struct FireplaceFan : Service::Fan {
 
 	float _overrideLevel = -1;
 
-	FireplaceFan() : Service::Fan() {
+	Fireplace() : Service::Fan() {
 		_onOff = new Characteristic::Active(false);
 		_level = new Characteristic::RotationSpeed(valveMaxValue);
 		_level->setRange(valveMinValue, valveMaxValue, valveStepValue);
@@ -393,13 +393,13 @@ struct FireplaceFan : Service::Fan {
 
 //////////////////////////////////////////////
 
-FireplaceFan* fireplace;
+Fireplace* fireplace;
 
 void createDevices() {
 	SPAN_ACCESSORY();   // create Bridge
 
 	SPAN_ACCESSORY(accessoryName);
-		fireplace = new FireplaceFan();
+		fireplace = new Fireplace();
 }
 
 //////////////////////////////////////////////
