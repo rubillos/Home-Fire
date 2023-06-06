@@ -24,25 +24,31 @@ constexpr uint8_t radioDataPin = MISO;
 
 //////////////////////////////////////////////
 
-// constexpr uint32_t igniteTimeMS = 15 * 1000;
-// constexpr uint32_t extinguishTimeMS = 15 * 1000;
-// constexpr uint32_t fullRangeValveTimeMS = 12 * 1000;
-
-constexpr uint32_t igniteTimeMS = 5 * 1000;
-constexpr uint32_t extinguishTimeMS = 5 * 1000;
+constexpr uint32_t igniteTimeMS = 30 * 1000;
+constexpr uint32_t extinguishTimeMS = 15 * 1000;
 constexpr uint32_t fullRangeValveTimeMS = 5 * 1000;
+constexpr uint32_t updateTimeMS = 500;
 
-constexpr uint32_t radioPeriodUS = 265;
-constexpr uint32_t packetGapTimeMS = 20;
+// constexpr uint32_t igniteTimeMS = 5 * 1000;
+// constexpr uint32_t extinguishTimeMS = 5 * 1000;
+// constexpr uint32_t fullRangeValveTimeMS = 5 * 1000;
+
+constexpr uint16_t repeatCount = 9;
+
+constexpr uint32_t radioPeriodUS = 300;
+constexpr uint32_t packetGapTimeMS = 30;
 
 constexpr uint8_t addressLength = 17;
-constexpr uint32_t remoteAddress = 0B01011100000100001;
+constexpr uint32_t remoteAddress = 0B01010100001110010;
 
 constexpr uint8_t cmdLength = 6;
 typedef enum {
-	cmdPilot = 0B110011,
+	cmdIgnite = 0B110011,
+	cmdExtinguish = 0B110111,
 	cmdUp = 0B111011,
-	cmdDown = 0B000000
+	cmdDown = 0B000000,
+	cmdMax = 0B101000,
+	cmdMin = 0B101001
 } CmdCode;
 
 //////////////////////////////////////////////
@@ -181,7 +187,8 @@ void updateIndicator(hardwareState state, float valvePosition) {
 
 //////////////////////////////////////////////
 
-rmt_item32_t pilotMessage[messageLength];
+rmt_item32_t igniteMessage[messageLength];
+rmt_item32_t extinguishMessage[messageLength];
 rmt_item32_t upMessage[messageLength];
 rmt_item32_t downMessage[messageLength];
 
@@ -222,7 +229,8 @@ void initRadio() {
 	// mark our channel used in the Adafruit driver.
 	rmt_reserved_channels[rmtChannel] = true;
 
-	encodeCommand(pilotMessage, cmdPilot);
+	encodeCommand(igniteMessage, cmdIgnite);
+	encodeCommand(extinguishMessage, cmdExtinguish);
 	encodeCommand(upMessage, cmdUp);
 	encodeCommand(downMessage, cmdDown);
 }
@@ -238,9 +246,10 @@ void sendMessage(rmt_item32_t* message) {
 
 void sendCommand(CmdCode cmd) {
 	switch (cmd) {
-		case cmdPilot:	sendMessage(pilotMessage);		break;
-		case cmdDown:	sendMessage(downMessage);		break;
-		case cmdUp:		sendMessage(upMessage);			break;
+		case cmdIgnite:		sendMessage(igniteMessage);			break;
+		case cmdExtinguish:	sendMessage(extinguishMessage);		break;
+		case cmdDown:		sendMessage(downMessage);			break;
+		case cmdUp:			sendMessage(upMessage);				break;
 	}
 }
 
@@ -261,6 +270,8 @@ struct Fireplace : Service::Fan {
 
 	float _overrideLevel = -1;
 
+	uint64_t _updateTime = 0;
+
 	Fireplace() : Service::Fan() {
 		_onOff = new Characteristic::Active(false);
 		_level = new Characteristic::RotationSpeed(valveMaxValue);
@@ -270,7 +281,7 @@ struct Fireplace : Service::Fan {
 	boolean update() {
 		uint64_t time = millis64();
 		bool onOffUpdated = _onOff->updated();
-		bool onOffValue = _onOff->getNewVal()>0;
+		bool onOffValue = _onOff->getNewVal();
 		bool levelUpdated = _level->updated();
 		float levelValue = _level->getNewVal<float>();
 		bool ignite = false;
@@ -297,20 +308,22 @@ struct Fireplace : Service::Fan {
 			SerPrintf("Ignite...\n");
 			_currentValvePosition = valveMinValue;
 			_state = stateIgniting;
-			_startStopCount = 10;
+			_startStopCount = repeatCount;
 			_valveStartPosition = _currentValvePosition;
 			_valveEndPosition = valveMaxValue;
 			_operationStartTime = time;
 			_operationEndTime = time + igniteTimeMS;
+			_updateTime = time + updateTimeMS;
 		}
 		else if (extinguish) {
 			SerPrintf("Extinguish...\n");
 			_state = stateExtinguishing;
-			_startStopCount = 5;
+			_startStopCount = repeatCount;
 			_valveStartPosition = _currentValvePosition;
-			_valveEndPosition = 10;
+			_valveEndPosition = repeatCount;
 			_operationStartTime = time;
 			_operationEndTime = time + extinguishTimeMS;
+			_updateTime = time + updateTimeMS;
 		}
 		else if (changeLevel) {
 			_valveStartPosition = _currentValvePosition;
@@ -333,8 +346,11 @@ struct Fireplace : Service::Fan {
 			// SerPrintf("Valve: %0.1f%%\n", _currentValvePosition);
 		}
 
-		if (_state == stateIgniting) {
-			_overrideLevel = 100;
+		if (_state == stateIgniting || _state == stateExtinguishing) {
+			if (time > _updateTime) {
+				_overrideLevel = _currentValvePosition;
+				_updateTime = time + updateTimeMS;
+			}
 		}
 
 		if ((_state == stateIncreasing || _state == stateDecreasing) && (time >= _operationEndTime)) {
@@ -345,17 +361,14 @@ struct Fireplace : Service::Fan {
 		else if (_state == stateIgniting && time >= _operationEndTime) {
 			_state = stateLitIdle;
 			_currentValvePosition = valveMaxValue;
+			_overrideLevel = valveMaxValue;
 			SerPrintf("Ignited.\n");
 		}
 		else if (_state == stateExtinguishing && time >= _operationEndTime) {
 			_state = stateOff;
+			_currentValvePosition = valveMinValue;
+			_overrideLevel = valveMinValue;
 			SerPrintf("Extinguished.\n");
-		}
-
-		bool onOffShouldBe = _state!=stateOff && _state!=stateExtinguishing;
-		if (_onOff->getVal() != onOffShouldBe) {
-			SerPrintf("Force onoOff to: %d\n", onOffShouldBe);
-			_onOff->setVal(onOffShouldBe);
 		}
 
 		if (_overrideLevel != -1) {
@@ -364,6 +377,12 @@ struct Fireplace : Service::Fan {
 				_level->setVal(_overrideLevel);
 			}
 			_overrideLevel = -1;
+		}
+
+		bool onOffShouldBe = _state!=stateOff;
+		if (_onOff->getNewVal() != onOffShouldBe) {
+			SerPrintf("Force onoOff to: %d\n", onOffShouldBe);
+			_onOff->setVal(onOffShouldBe);
 		}
 
 		if (time >= dontSendBeforeTime) {
@@ -376,14 +395,14 @@ struct Fireplace : Service::Fan {
 				// SerPrintf("Send: Down\n");
 			}
 			else if (_state == stateIgniting && _startStopCount) {
-				sendCommand(cmdPilot);
+				sendCommand(cmdIgnite);
 				_startStopCount -= 1;
-				SerPrintf("Send: Pilot\n");
+				SerPrintf("Send: Ignite\n");
 			}
 			else if (_state == stateExtinguishing && _startStopCount) {
-				sendCommand(cmdPilot);
+				sendCommand(cmdExtinguish);
 				_startStopCount -= 1;
-				SerPrintf("Send: Pilot\n");
+				SerPrintf("Send: Extinguish\n");
 			}
 		}
 
